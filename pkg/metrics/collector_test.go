@@ -63,7 +63,6 @@ func init() {
 	volumes[0].Status.TargetPath = "/path/targetpath"
 	volumes[1].Status.UsedCapacity = 20 * MiB
 	volumes[1].Status.TargetPath = "/path/targetpath"
-
 	client.FakeInit()
 }
 
@@ -194,6 +193,13 @@ func TestDriveStatsEmitter(t *testing.T) {
 			"loop2",
 			"Default",
 		),
+		*types.NewDrive(
+			"non-existent-drive",
+			types.DriveStatus{},
+			"test-node-1",
+			"xyz",
+			"Default",
+		),
 	}
 	testDrives[0].Status.FSUUID = "fsuuid1"
 	testDrives[0].Status.TotalCapacity = 100 * MiB
@@ -203,21 +209,20 @@ func TestDriveStatsEmitter(t *testing.T) {
 	// Mock drive stats
 	mockDrives := map[string]*driveStats{
 		"test-drive-1": {
-			status:       1,
-			readSectors:  1000,
-			readTicks:    500,
-			writeSectors: 2000,
-			writeTicks:   1000,
-			timeInQueue:  1500,
+			readSectorBytes:  1000,
+			readTicks:        500,
+			writeSectorBytes: 2000,
+			writeTicks:       1000,
+			timeInQueue:      1500,
 		},
 		"test-drive-2": {
-			status:       1,
-			readSectors:  2000,
-			readTicks:    750,
-			writeSectors: 3000,
-			writeTicks:   1500,
-			timeInQueue:  2000,
+			readSectorBytes:  2000,
+			readTicks:        750,
+			writeSectorBytes: 3000,
+			writeTicks:       1500,
+			timeInQueue:      2000,
 		},
+		"non-existent-drive": nil,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -235,53 +240,52 @@ func TestDriveStatsEmitter(t *testing.T) {
 			return
 		}
 
+		status := float64(1)
+		if stats == nil {
+			status = float64(0)
+		}
+
 		// Emit mock metrics
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(string(metricStatsDriveReady), "Drive ready status", []string{"drive"}, nil),
 			prometheus.GaugeValue,
-			float64(stats.status),
-			drive.Name,
+			status, drive.Name,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(string(metricStatsDriveBytesRead), "Bytes read from drive", []string{"drive"}, nil),
 			prometheus.GaugeValue,
-			float64(stats.readSectors*512),
-			drive.Name,
+			stats.readSectorBytes, drive.Name,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(string(metricStatsDriveBytesWritten), "Bytes written to drive", []string{"drive"}, nil),
 			prometheus.GaugeValue,
-			float64(stats.writeSectors*512),
-			drive.Name,
+			stats.writeSectorBytes, drive.Name,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(string(metricStatsDriveReadLatency), "Drive read latency", []string{"drive"}, nil),
 			prometheus.GaugeValue,
-			float64(stats.readTicks)/1000,
-			drive.Name,
+			stats.readTicks/1000, drive.Name,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(string(metricStatsDriveWriteLatency), "Drive write latency", []string{"drive"}, nil),
 			prometheus.GaugeValue,
-			float64(stats.writeTicks)/1000,
-			drive.Name,
+			stats.writeTicks/1000, drive.Name,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(string(metricStatsDriveReadThroughput), "Drive read throughput", []string{"drive"}, nil),
 			prometheus.GaugeValue,
-			float64(stats.readSectors*512)*1000/float64(stats.readTicks),
-			drive.Name,
+			1000*stats.readSectorBytes/stats.readTicks, drive.Name,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(string(metricStatsDriveWriteThroughput), "Drive write throughput", []string{"drive"}, nil),
 			prometheus.GaugeValue,
-			float64(stats.writeSectors*512)*1000/float64(stats.writeTicks),
+			1000*stats.writeSectorBytes/stats.writeTicks,
 			drive.Name,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(string(metricStatsDriveWaitTime), "Drive wait time", []string{"drive"}, nil),
 			prometheus.GaugeValue,
-			float64(stats.timeInQueue)/1000,
+			stats.timeInQueue/1000,
 			drive.Name,
 		)
 	}

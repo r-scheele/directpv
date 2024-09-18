@@ -32,6 +32,43 @@ import (
 	"k8s.io/klog/v2"
 )
 
+type driveStats struct {
+	readSectorBytes  float64
+	readTicks        float64
+	writeSectorBytes float64
+	writeTicks       float64
+	timeInQueue      float64
+}
+
+func getDriveStats(driveName string) (*driveStats, error) {
+	stat, err := device.GetStat(driveName)
+	switch {
+	case err != nil:
+		return nil, err
+	case len(stat) == 0:
+		return nil, fmt.Errorf("unable to read stat from drive %v", driveName)
+	case len(stat) < 10:
+		return nil, fmt.Errorf("invalid stat format from drive %v", driveName)
+	}
+
+	hardwareSectorSize, err := device.GetHardwareSectorSize(driveName)
+	switch {
+	case err != nil:
+		return nil, err
+	case hardwareSectorSize == 0:
+		hardwareSectorSize = 512 // Use default value
+	}
+
+	// Refer https://www.kernel.org/doc/Documentation/block/stat.txt for meaning of each field.
+	return &driveStats{
+		readSectorBytes:  float64(stat[2] * hardwareSectorSize),
+		readTicks:        float64(stat[3]),
+		writeSectorBytes: float64(stat[6] * hardwareSectorSize),
+		writeTicks:       float64(stat[7]),
+		timeInQueue:      float64(stat[9]),
+	}, nil
+}
+
 type metricsCollector struct {
 	nodeID            directpvtypes.NodeID
 	desc              *prometheus.Desc
@@ -98,15 +135,6 @@ func (c *metricsCollector) publishVolumeStats(ctx context.Context, volume *types
 	)
 }
 
-type driveStats struct {
-	status       int
-	readSectors  uint64
-	readTicks    uint64
-	writeSectors uint64
-	writeTicks   uint64
-	timeInQueue  uint64
-}
-
 func (c *metricsCollector) publishDriveStats(drive *types.Drive, ch chan<- prometheus.Metric) {
 	deviceID, err := c.getDeviceByFSUUID(drive.Status.FSUUID)
 	if err != nil {
@@ -127,16 +155,12 @@ func (c *metricsCollector) publishDriveStats(drive *types.Drive, ch chan<- prome
 		return
 	}
 	deviceName := utils.TrimDevPrefix(deviceID)
+
+	status := float64(1) // Online
 	driveStat, err := getDriveStats(deviceName)
 	if err != nil {
 		klog.ErrorS(err, "unable to read drive statistics")
-		return
-	}
-
-	sectorSizeBytes, err := device.GetHardwareSectorSize(deviceName)
-	if err != nil {
-		klog.Errorf("Error getting hardware sector size: %v", err)
-		sectorSizeBytes = 512
+		status = float64(0) // Offline
 	}
 
 	// Metrics
@@ -146,8 +170,7 @@ func (c *metricsCollector) publishDriveStats(drive *types.Drive, ch chan<- prome
 			"Drive Online/Offline Status",
 			[]string{"drive"}, nil),
 		prometheus.GaugeValue,
-		float64(driveStat.status), // 0 for offline, 1 for online
-		drive.Name,
+		status, drive.Name,
 	)
 	ch <- prometheus.MustNewConstMetric(
 		prometheus.NewDesc(
@@ -155,7 +178,7 @@ func (c *metricsCollector) publishDriveStats(drive *types.Drive, ch chan<- prome
 			"Total number of bytes read from the drive",
 			[]string{"drive"}, nil),
 		prometheus.GaugeValue,
-		float64(driveStat.readSectors)*float64(sectorSizeBytes), drive.Name,
+		driveStat.readSectorBytes, drive.Name,
 	)
 
 	ch <- prometheus.MustNewConstMetric(
@@ -164,7 +187,7 @@ func (c *metricsCollector) publishDriveStats(drive *types.Drive, ch chan<- prome
 			"Total number of bytes written to the drive",
 			[]string{"drive"}, nil),
 		prometheus.GaugeValue,
-		float64(driveStat.writeSectors)*float64(sectorSizeBytes), drive.Name,
+		driveStat.writeSectorBytes, drive.Name,
 	)
 
 	// Drive Read/Write Latency
@@ -174,7 +197,7 @@ func (c *metricsCollector) publishDriveStats(drive *types.Drive, ch chan<- prome
 			"Drive Read Latency",
 			[]string{"drive"}, nil),
 		prometheus.GaugeValue,
-		float64(driveStat.readTicks)/1000, drive.Name,
+		driveStat.readTicks/1000, drive.Name,
 	)
 
 	ch <- prometheus.MustNewConstMetric(
@@ -183,7 +206,7 @@ func (c *metricsCollector) publishDriveStats(drive *types.Drive, ch chan<- prome
 			"Drive Write Latency",
 			[]string{"drive"}, nil),
 		prometheus.GaugeValue,
-		float64(driveStat.writeTicks)/1000, drive.Name,
+		driveStat.writeTicks/1000, drive.Name,
 	)
 
 	// Drive Read/Write Throughput
@@ -193,7 +216,7 @@ func (c *metricsCollector) publishDriveStats(drive *types.Drive, ch chan<- prome
 			"Drive Read Throughput",
 			[]string{"drive"}, nil),
 		prometheus.GaugeValue,
-		float64(driveStat.readSectors)*float64(sectorSizeBytes)*1000/float64(driveStat.readTicks), drive.Name,
+		1000*driveStat.readSectorBytes/driveStat.readTicks, drive.Name,
 	)
 
 	ch <- prometheus.MustNewConstMetric(
@@ -202,7 +225,7 @@ func (c *metricsCollector) publishDriveStats(drive *types.Drive, ch chan<- prome
 			"Drive Write Throughput",
 			[]string{"drive"}, nil),
 		prometheus.GaugeValue,
-		float64(driveStat.writeSectors)*float64(sectorSizeBytes)*1000/float64(driveStat.writeTicks), drive.Name,
+		1000*driveStat.writeSectorBytes/driveStat.writeTicks, drive.Name,
 	)
 
 	// Wait Time
@@ -212,37 +235,8 @@ func (c *metricsCollector) publishDriveStats(drive *types.Drive, ch chan<- prome
 			"Drive Wait Time",
 			[]string{"drive"}, nil),
 		prometheus.GaugeValue,
-		float64(driveStat.timeInQueue)/1000, drive.Name,
+		driveStat.timeInQueue/1000, drive.Name,
 	)
-}
-
-func getDriveStats(driveName string) (*driveStats, error) {
-	stats, status, err := device.GetStat(driveName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read drive statistics for %s: %v", driveName, err)
-	}
-
-	if len(stats) == 0 {
-		klog.Warningf("No stats found for drive %s, the drive may be lost", driveName)
-		return nil, nil
-	}
-
-	if len(stats) < 10 {
-		return nil, fmt.Errorf("insufficient stats from sysfs for drive %s: got %d values, expected at least 10", driveName, len(stats))
-	}
-
-	// Refer https://www.kernel.org/doc/Documentation/block/stat.txt
-	// for meaning of each field.
-	driveStats := &driveStats{
-		status:       status,
-		readSectors:  stats[2],
-		readTicks:    stats[3],
-		writeSectors: stats[6],
-		writeTicks:   stats[7],
-		timeInQueue:  stats[9],
-	}
-
-	return driveStats, nil
 }
 
 // Collect is called by Prometheus registry when collecting metrics.
@@ -256,7 +250,7 @@ func (c *metricsCollector) Collect(ch chan<- prometheus.Metric) {
 		List(ctx)
 	for result := range volumeResultCh {
 		if result.Err != nil {
-			continue
+			break
 		}
 
 		if result.Volume.Status.TargetPath != "" {

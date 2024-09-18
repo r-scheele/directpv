@@ -20,13 +20,12 @@ package device
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path"
 	"strconv"
 	"strings"
-
-	"k8s.io/klog/v2"
 )
 
 const defaultBlockSize = 512
@@ -110,94 +109,48 @@ func getDMName(name string) (string, error) {
 	return readFirstLine("/sys/class/block/" + name + "/dm/name")
 }
 
-// GetStat retrieves and returns statistics for a given device name.
-func GetStat(name string) ([]uint64, int, error) {
-	filePath := path.Join("/sys/class/block/", name, "/stat")
-
-	driveStatus := 1
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		klog.Warningf("Sysfs directory for drive %s does not exist", name)
-		driveStatus = 0
-		return nil, driveStatus, nil
-	}
-
-	klog.Infof("Reading drive statistics from: %s", filePath)
-
-	file, err := os.Open(filePath)
+// GetStat returns statistics for a given device name.
+func GetStat(name string) (stats []uint64, err error) {
+	line, err := readFirstLine("/sys/class/block/" + name + "/stat")
 	if err != nil {
-		return nil, driveStatus, fmt.Errorf("failed to open file %s: %v", filePath, err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return nil, driveStatus, fmt.Errorf("error reading file %s: %v", filePath, err)
-		}
-		return nil, driveStatus, fmt.Errorf("file %s is empty", filePath)
+		return nil, err
 	}
 
-	line := scanner.Text()
-
-	var stats []uint64
-	for _, token := range strings.Fields(line) {
-		if token == "" {
-			continue // Skip empty tokens
-		}
-
+	for _, token := range strings.Split(line, " ") {
+		token = strings.TrimSpace(token)
 		ui64, err := strconv.ParseUint(token, 10, 64)
 		if err != nil {
-			klog.Warningf("Failed to parse token '%s': %v", token, err)
-			continue // Skip this token and continue with the next
+			return nil, err
 		}
 		stats = append(stats, ui64)
 	}
 
-	if len(stats) == 0 {
-		return nil, driveStatus, fmt.Errorf("no valid statistics found in file %s", filePath)
-	}
-
-	return stats, driveStatus, nil
+	return stats, nil
 }
 
-// GetHardwareSectorSize retrieves the hardware sector size for a given device.
-// It works for both whole disks and partitions.
-// The device name should be without the "/dev/" prefix (e.g., "sda" or "sda1").
-func GetHardwareSectorSize(deviceName string) (uint64, error) {
-	basePath := "/sys/class/block"
-	devicePath := path.Join(basePath, deviceName)
-
-	// Check if it's a partition
-	isPartition := false
-	if _, err := os.Stat(path.Join(devicePath, "partition")); err == nil {
-		isPartition = true
-	}
-
-	// If it's a partition, find the parent disk
-	if isPartition {
-		parentPath, err := os.Readlink(devicePath)
-		if err != nil {
-			return 0, fmt.Errorf("failed to read link for partition %s: %v", deviceName, err)
+// GetHardwareSectorSize returns hardware sector size of associated drive.
+func GetHardwareSectorSize(name string) (uint64, error) {
+	if _, err := os.Lstat("/sys/block/" + name); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return 0, err
 		}
-		devicePath = path.Join(basePath, path.Base(path.Dir(parentPath)))
-		klog.Infof("Partition %s, using parent disk: %s", deviceName, path.Base(devicePath))
+
+		partPath := "/sys/class/block/" + name
+		if _, err = os.Stat(partPath + "/partition"); err != nil {
+			return 0, err
+		}
+
+		linkPath, err := os.Readlink(partPath)
+		if err != nil {
+			return 0, err
+		}
+
+		name = path.Base(path.Dir(linkPath))
 	}
 
-	// The file containing the hardware sector size
-	sectorSizePath := path.Join(devicePath, "queue/hw_sector_size")
-
-	// Read the contents of the file
-	content, err := os.ReadFile(sectorSizePath)
-	if err != nil {
-		return 0, fmt.Errorf("failed to read hardware sector size for %s: %v", deviceName, err)
+	s, err := readFirstLine("/sys/block/" + name + "/queue/hw_sector_size")
+	if err != nil || s == "" {
+		return 0, err
 	}
-
-	// Parse the sector size as an integer
-	sectorSize, err := strconv.ParseUint(strings.TrimSpace(string(content)), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse hardware sector size for %s: %v", deviceName, err)
-	}
-
-	klog.Infof("Hardware sector size for %s: %d bytes", deviceName, sectorSize)
-	return sectorSize, nil
+	return strconv.ParseUint(s, 10, 64)
 }
