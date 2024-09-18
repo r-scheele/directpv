@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/minio/directpv/pkg/consts"
@@ -40,7 +41,6 @@ func NewLegacyServer() *LegacyServer {
 func (c *LegacyServer) CreateVolume(_ context.Context, _ *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	return nil, status.Errorf(
 		codes.InvalidArgument,
-		"legacy volume creation not supported; use %v storage class",
-		consts.Identity,
+		fmt.Sprintf("legacy volume creation not supported; use %v storage class", consts.Identity),
 	)
 }
